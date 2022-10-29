@@ -1,163 +1,242 @@
-﻿using System;
-using System.Collections;
+using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.IO;
+using System.Diagnostics;
 using System.Linq;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Windows.Forms;
-using Wox.Plugin;
-using static System.Net.Mime.MediaTypeNames;
+using System.Threading.Tasks;
+using System.Text.RegularExpressions;
+using System.Windows.Controls;
+using NLog;
+using Wox.Infrastructure;
+using Wox.Infrastructure.Logger;
+using Wox.Infrastructure.Storage;
+using Wox.Plugin.Program.Programs;
+using Wox.Plugin.Program.Views;
+using System.Threading;
 
-namespace Wox.Plugin.EverythingXProgram
+namespace Wox.Plugin.Program
 {
-	public class Main : IPlugin
-	{
-		static string[] Extension = new string[] { ".bat", ".appref-ms", ".exe", ".lnk" };
+    public class Main : ISettingProvider, IPlugin, IPluginI18n, IContextMenu, ISavable, IReloadable
+    {
+        internal static Win32[] _win32s { get; set; }
+        internal static UWP.Application[] _uwps { get; set; }
+        internal static Settings _settings { get; set; }
 
-		void IPlugin.Init(PluginInitContext context)
-		{
-			//throw new NotImplementedException();
-		}
+        private static PluginInitContext _context;
+        private CancellationTokenSource _updateSource;
 
-		List<Result> IPlugin.Query(Query query)
-		{
-			//MessageBox.Show("IPlugin.Query(Query query)");
+        private static BinaryStorage<Win32[]> _win32Storage;
+        private static BinaryStorage<UWP.Application[]> _uwpStorage;
+        private PluginJsonStorage<Settings> _settingsStorage;
 
-			List<Result> result = new List<Result>();
+        private static readonly NLog.Logger Logger = LogManager.GetCurrentClassLogger();
 
-			var res = FindProgram(query.RawQuery);
+        private static void preloadPrograms()
+        {
+            Logger.StopWatchNormal("Preload programs cost", () =>
+            {
+                _win32Storage = new BinaryStorage<Win32[]>("Win32");
+                _win32s = _win32Storage.TryLoad(new Win32[] { });
+                _uwpStorage = new BinaryStorage<UWP.Application[]>("UWP");
+                _uwps = _uwpStorage.TryLoad(new UWP.Application[] { });
+            });
+            Logger.WoxInfo($"Number of preload win32 programs <{_win32s.Length}>");
+            Logger.WoxInfo($"Number of preload uwps <{_uwps.Length}>");
+        }
 
-			foreach (var item in res)
-			{
-				Result newResult = new Result();
-				newResult.Title = item.Name;
-				newResult.SubTitle = item.FullName;
-				newResult.IcoPath = item.FullName;
+        public void Save()
+        {
+            _settingsStorage.Save();
+            _win32Storage.Save(_win32s);
+            _uwpStorage.Save(_uwps);
+        }
 
-				result.Add(newResult);
-			}
+        public List<Result> Query(Query query)
+        {
 
-			return result;
-		}
+            if (_updateSource != null && !_updateSource.IsCancellationRequested)
+            {
+                _updateSource.Cancel();
+                Logger.WoxDebug($"cancel init {_updateSource.Token.GetHashCode()} {Thread.CurrentThread.ManagedThreadId} {query.RawQuery}");
+                _updateSource.Dispose();
+            }
+            var source = new CancellationTokenSource();
+            _updateSource = source;
+            var token = source.Token;
 
-		public static List<FileInfo> FindProgram(string query)
-		{
-			List<FileInfo> result = new List<FileInfo>();
+            ConcurrentBag<Result> resultRaw = new ConcurrentBag<Result>();
 
-			Everything.Everything_SetSearchW(query);
-			Everything.Everything_QueryW(true);
-			int fileNum = Everything.Everything_GetNumResults();
+            if (token.IsCancellationRequested) { return new List<Result>(); }
+            Parallel.ForEach(_win32s, (program, state) =>
+            {
+                if (token.IsCancellationRequested) { state.Break(); }
+                if (program.Enabled)
+                {
+                    var r = program.Result(query.Search, _context.API);
+                    if (r != null && r.Score > 0)
+                    {
+                        resultRaw.Add(r);
+                    }
+                }
+            });
+            if (token.IsCancellationRequested) { return new List<Result>(); }
+            Parallel.ForEach(_uwps, (program, state) =>
+            {
+                if (token.IsCancellationRequested) { state.Break(); }
+                if (program.Enabled)
+                {
+                    var r = program.Result(query.Search, _context.API);
+                    if (token.IsCancellationRequested) { state.Break(); }
+                    if (r != null && r.Score > 0)
+                    {
+                        resultRaw.Add(r);
+                    }
+                }
+            });
 
-			for (int i = 0; i < fileNum; i++)
-			{
-				const int bufsize = 1024;
-				StringBuilder buf = new StringBuilder(bufsize);
+            if (token.IsCancellationRequested) { return new List<Result>(); }
+            OrderedParallelQuery<Result> sorted = resultRaw.AsParallel().OrderByDescending(r => r.Score);
+            List<Result> results = new List<Result>();
+            foreach (Result r in sorted)
+            {
+                if (token.IsCancellationRequested) { return new List<Result>(); }
+                var ignored = _settings.IgnoredSequence.Any(entry =>
+                {
+                    if (entry.IsRegex)
+                    {
+                        return Regex.Match(r.Title, entry.EntryString).Success || Regex.Match(r.SubTitle, entry.EntryString).Success;
+                    }
+                    else
+                    {
+                        return r.Title.ToLower().Contains(entry.EntryString) || r.SubTitle.ToLower().Contains(entry.EntryString);
+                    }
+                });
+                if (!ignored)
+                {
+                    results.Add(r);
+                }
+                if (results.Count == 30)
+                {
+                    break;
+                }
+            }
+            return results;
+        }
 
-				if (Everything.Everything_IsFileResult(i) == false)
-					continue;
+        public void Init(PluginInitContext context)
+        {
+            _context = context;
+            loadSettings();
 
-				Everything.Everything_GetResultFullPathNameW(i, buf, bufsize);
+            preloadPrograms();
 
-				FileInfo fileInfo = new FileInfo(buf.ToString());
+            Task.Delay(2000).ContinueWith(_ =>
+            {
+                IndexPrograms();
+                Save();
+            });
+        }
 
-				if (Extension.Contains(fileInfo.Extension))
-				{
-					result.Add(fileInfo);
-				}
-			}
+        public void InitSync(PluginInitContext context)
+        {
+            _context = context;
+            loadSettings();
+            IndexPrograms();
+        }
 
-			return result.OrderBy(d => d.Name).ToList();
-		}
-	}
+        public void loadSettings()
+        {
+            _settingsStorage = new PluginJsonStorage<Settings>();
+            _settings = _settingsStorage.Load();
+        }
 
-	public class Test
-	{
-		public static void RunTest()
-		{
-			var res = EverythingXProgram.Main.FindProgram("launch");
+        public static void IndexWin32Programs()
+        {
+            var win32S = Win32.All(_settings);
+            _win32s = win32S;
+        }
 
-			foreach (FileInfo file in res )
-			{
-				Console.WriteLine(file.FullName);
-			}
-		}
-	}
+        public static void IndexUWPPrograms()
+        {
+            var windows10 = new Version(10, 0);
+            var support = Environment.OSVersion.Version.Major >= windows10.Major;
 
-	class Everything
-	{
-		[DllImport("Everything64.dll", CharSet = CharSet.Unicode)]
-		public static extern int Everything_SetSearchW(string lpSearchString);
-		[DllImport("Everything64.dll")]
-		public static extern void Everything_SetMatchPath(bool bEnable);
-		[DllImport("Everything64.dll")]
-		public static extern void Everything_SetMatchCase(bool bEnable);
-		[DllImport("Everything64.dll")]
-		public static extern void Everything_SetMatchWholeWord(bool bEnable);
-		[DllImport("Everything64.dll")]
-		public static extern void Everything_SetRegex(bool bEnable);
-		[DllImport("Everything64.dll")]
-		public static extern void Everything_SetMax(int dwMax);
-		[DllImport("Everything64.dll")]
-		public static extern void Everything_SetOffset(int dwOffset);
-		[DllImport("Everything64.dll")]
-		public static extern void Everything_SetReplyWindow(IntPtr hWnd);
-		[DllImport("Everything64.dll")]
-		public static extern void Everything_SetReplyID(int nId);
+            var applications = support ? UWP.All() : new UWP.Application[] { };
+            _uwps = applications;
+        }
 
-		[DllImport("Everything64.dll")]
-		public static extern bool Everything_GetMatchPath();
-		[DllImport("Everything64.dll")]
-		public static extern bool Everything_GetMatchCase();
-		[DllImport("Everything64.dll")]
-		public static extern bool Everything_GetMatchWholeWord();
-		[DllImport("Everything64.dll")]
-		public static extern bool Everything_GetRegex();
-		[DllImport("Everything64.dll")]
-		public static extern UInt32 Everything_GetMax();
-		[DllImport("Everything64.dll")]
-		public static extern UInt32 Everything_GetOffset();
-		[DllImport("Everything64.dll")]
-		public static extern string Everything_GetSearch();
-		[DllImport("Everything64.dll")]
-		public static extern int Everything_GetLastError();
-		[DllImport("Everything64.dll")]
-		public static extern IntPtr Everything_GetReplyWindow();
-		[DllImport("Everything64.dll")]
-		public static extern int Everything_GetReplyID();
+        public static void IndexPrograms()
+        {
+            var a = Task.Run(() =>
+            {
+                Logger.StopWatchNormal("Win32 index cost", IndexWin32Programs);
+            });
 
-		[DllImport("Everything64.dll")]
-		public static extern bool Everything_QueryW(bool bWait);
+            var b = Task.Run(() =>
+            {
+                Logger.StopWatchNormal("UWP index cost", IndexUWPPrograms);
+            });
 
-		[DllImport("Everything64.dll")]
-		public static extern bool Everything_IsQueryReply(int message, IntPtr wParam, IntPtr lParam, uint nId);
+            Task.WaitAll(a, b);
 
-		[DllImport("Everything64.dll")]
-		public static extern void Everything_SortResultsByPath();
+            Logger.WoxInfo($"Number of indexed win32 programs <{_win32s.Length}>");
+            foreach (var win32 in _win32s)
+            {
+                Logger.WoxDebug($" win32: <{win32.Name}> <{win32.ExecutableName}> <{win32.FullPath}>");
+            }
+            Logger.WoxInfo($"Number of indexed uwps <{_uwps.Length}>");
+            foreach (var uwp in _uwps)
+            {
+                Logger.WoxDebug($" uwp: <{uwp.DisplayName}> <{uwp.UserModelId}>");
+            }
+            _settings.LastIndexTime = DateTime.Today;
+            
+        }
 
-		[DllImport("Everything64.dll")]
-		public static extern int Everything_GetNumFileResults();
-		[DllImport("Everything64.dll")]
-		public static extern int Everything_GetNumFolderResults();
-		[DllImport("Everything64.dll")]
-		public static extern int Everything_GetNumResults();
-		[DllImport("Everything64.dll")]
-		public static extern int Everything_GetTotFileResults();
-		[DllImport("Everything64.dll")]
-		public static extern int Everything_GetTotFolderResults();
-		[DllImport("Everything64.dll")]
-		public static extern int Everything_GetTotResults();
-		[DllImport("Everything64.dll")]
-		public static extern bool Everything_IsVolumeResult(int nIndex);
-		[DllImport("Everything64.dll")]
-		public static extern bool Everything_IsFolderResult(int nIndex);
-		[DllImport("Everything64.dll")]
-		public static extern bool Everything_IsFileResult(int nIndex);
-		[DllImport("Everything64.dll", CharSet = CharSet.Unicode)]
-		public static extern void Everything_GetResultFullPathNameW(int nIndex, StringBuilder lpString, int nMaxCount);
-		[DllImport("Everything64.dll")]
-		public static extern void Everything_Reset();
+        public Control CreateSettingPanel()
+        {
+            return new ProgramSetting(_context, _settings, _win32s, _uwps);
+        }
 
-		const int MY_REPLY_ID = 0;
-	}
+        public string GetTranslatedPluginTitle()
+        {
+            return _context.API.GetTranslation("wox_plugin_program_plugin_name");
+        }
+
+        public string GetTranslatedPluginDescription()
+        {
+            return _context.API.GetTranslation("wox_plugin_program_plugin_description");
+        }
+
+        public List<Result> LoadContextMenus(Result selectedResult)
+        {
+            var menuOptions = new List<Result>();
+            var program = selectedResult.ContextData as IProgram;
+            if (program != null)
+            {
+                menuOptions = program.ContextMenus(_context.API);
+            }
+            return menuOptions;
+        }
+
+
+        public static void StartProcess(Func<ProcessStartInfo, Process> runProcess, ProcessStartInfo info)
+        {
+            try
+            {
+                runProcess(info);
+            }
+            catch (Exception)
+            {
+                var name = "Plugin: Program";
+                var message = $"Unable to start: {info.FileName}";
+                _context.API.ShowMsg(name, message, string.Empty);
+            }
+        }
+
+        public void ReloadData()
+        {
+            IndexPrograms();
+        }
+    }
 }
