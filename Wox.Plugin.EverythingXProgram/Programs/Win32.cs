@@ -13,6 +13,8 @@ using Wox.Infrastructure;
 using Wox.Infrastructure.Logger;
 using Microsoft.WindowsAPICodePack.Shell;
 using Windows.ApplicationModel.Resources;
+using System.Collections;
+//using Wox.Plugin.Program.Properties;
 
 namespace Wox.Plugin.Program.Programs
 {
@@ -290,48 +292,47 @@ namespace Wox.Plugin.Program.Programs
 
         public static Win32[] All(Settings settings)
         {
+            List<Win32> result = new List<Win32>();
 
-            var programs = new List<Win32>().AsParallel();
-            try
-            {
-                var unregistered = UnregisteredPrograms(settings.ProgramSources, settings.ProgramSuffixes);
-                programs = programs.Concat(unregistered);
-            }
-            catch (Exception e)
-            {
-                Logger.WoxError("Cannot read win32", e);
-                return new Win32[] { };
-            }
+            string query = string.Format("\\.({0})$", string.Join("|", settings.ProgramSuffixes));
 
-            try
+            Everything.Everything_SetSearchW(query);
+            Everything.Everything_SetRegex(true);
+            Everything.Everything_QueryW(true);
+            int fileNum = Everything.Everything_GetNumResults();
+
+            for (int i = 0; i < fileNum; i++)
             {
-                if (settings.EnableRegistrySource)
+                try
                 {
-                    var appPaths = AppPathsPrograms(settings.ProgramSuffixes);
-                    programs = programs.Concat(appPaths);
+                    const int bufsize = 1024;
+                    StringBuilder buf = new StringBuilder(bufsize);
+
+                    if (Everything.Everything_IsFileResult(i) == false)
+                        continue;
+
+                    Everything.Everything_GetResultFullPathNameW(i, buf, bufsize);
+
+                    string fullPath = buf.ToString();
+
+                    bool bIgnored = false;
+                    foreach (var ignored in settings.IgnoredSequence)
+                    {
+                        if (fullPath.Contains(ignored.EntryString))
+                        {
+                            bIgnored = true;
+                            break;
+                        }
+                    }
+
+                    if (bIgnored) continue;
+
+                    result.Add(Win32.Win32Program(fullPath));
                 }
-            }
-            catch (Exception e)
-            {
-                Logger.WoxError("Cannot read win32", e);
-                return new Win32[] { };
+                catch { }
             }
 
-            try
-            {
-                if (settings.EnableStartMenuSource)
-                {
-                    var startMenu = StartMenuPrograms(settings.ProgramSuffixes);
-                    programs = programs.Concat(startMenu);
-                }
-            }
-            catch (Exception e)
-            {
-                Logger.WoxError("Cannot read win32", e);
-                return new Win32[] { };
-            }
-            return programs.ToArray();
-
+            return result.ToArray();
         }
     }
 }

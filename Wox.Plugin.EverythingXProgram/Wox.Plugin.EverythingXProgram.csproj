@@ -69,6 +69,7 @@
     <Compile Include="AddProgramSource.xaml.cs">
       <DependentUpon>AddProgramSource.xaml</DependentUpon>
     </Compile>
+    <Compile Include="Everything.cs" />
     <Compile Include="FileChangeWatcher.cs" />
     <Compile Include="ProgramSource.cs" />
     <Compile Include="Programs\IProgram.cs" />

@@ -207,11 +207,15 @@ namespace Wox.Plugin.Program.Programs
                 }
             }
 
-            // only exception windows.immersivecontrolpanel_10.0.2.1000_neutral_neutral_cw5n1h2txyewy
-            string settingsID = actiable.First(a => a.StartsWith("windows.immersivecontrolpanel"));
-            string settingsLocation = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "ImmersiveControlPanel");
-            UWP swttings = new UWP(settingsID, settingsLocation);
-            packages.Add(swttings);
+            try
+            {
+                // only exception windows.immersivecontrolpanel_10.0.2.1000_neutral_neutral_cw5n1h2txyewy
+                string settingsID = actiable.First(a => a.StartsWith("windows.immersivecontrolpanel"));
+                string settingsLocation = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "ImmersiveControlPanel");
+                UWP swttings = new UWP(settingsID, settingsLocation);
+                packages.Add(swttings);
+            }
+            catch { }
 
             return packages;
         }
