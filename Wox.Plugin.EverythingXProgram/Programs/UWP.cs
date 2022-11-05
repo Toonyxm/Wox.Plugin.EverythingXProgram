@@ -18,6 +18,7 @@ using NLog;
 using System.Collections.Concurrent;
 using Microsoft.Win32;
 using System.Xml;
+using Wox.Infrastructure.UserSettings;
 
 namespace Wox.Plugin.Program.Programs
 {
@@ -149,8 +150,38 @@ namespace Wox.Plugin.Program.Programs
 
         public static Application[] All()
         {
+            string query = @"C:\\Program Files\\WindowsApps\\.*\\AppxManifest.xml";
+
+            Everything.Everything_SetSearchW(query);
+            Everything.Everything_QueryW(true);
+            Everything.Everything_SetRegex(true);
+            int fileNum = Everything.Everything_GetNumResults();
+
+            List<UWP> packages = new List<UWP>();
+
+            for (int i = 0; i < fileNum; i++)
+            {
+                const int bufsize = 1024;
+                StringBuilder buf = new StringBuilder(bufsize);
+
+                if (Everything.Everything_IsFileResult(i) == false)
+                    continue;
+
+                Everything.Everything_GetResultFullPathNameW(i, buf, bufsize);
+
+                string appxManifest = buf.ToString();
+
+                if (File.Exists(appxManifest) == false)
+                    continue;
+
+                string dirPath = Path.GetDirectoryName(appxManifest);
+                string dirName = Path.GetFileName(dirPath);
+
+                packages.Add(new UWP(dirName, dirPath));
+            }
+
             ConcurrentBag<Application> bag = new ConcurrentBag<Application>();
-            Parallel.ForEach(PackageFoldersFromRegistry(), (package, state) =>
+            Parallel.ForEach(packages, (package, state) =>
             {
                 try
                 {

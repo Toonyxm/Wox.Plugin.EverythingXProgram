@@ -167,17 +167,9 @@ namespace Wox.Plugin.Program
 
         public static void IndexPrograms()
         {
-            var a = Task.Run(() =>
-            {
-                Logger.StopWatchNormal("Win32 index cost", IndexWin32Programs);
-            });
+            Logger.StopWatchNormal("Win32 index cost", IndexWin32Programs);
 
-            var b = Task.Run(() =>
-            {
-                Logger.StopWatchNormal("UWP index cost", IndexUWPPrograms);
-            });
-
-            Task.WaitAll(a, b);
+            Logger.StopWatchNormal("UWP index cost", IndexUWPPrograms);
 
             Logger.WoxInfo($"Number of indexed win32 programs <{_win32s.Length}>");
             foreach (var win32 in _win32s)
